@@ -7,16 +7,21 @@ import threading
 from client.stub import ChatStub
 from shared.protocol import decode
 
-def thread_recebimento(socket_file, rodando):
+def thread_recebimento(stub, rodando):
     """
-    Roda em paralelo — fica escutando mensagens que chegam do servidor.
-    Quando chega algo, imprime na tela.
-    'rodando' é uma lista com um booleano — usamos lista pelo mesmo
-    motivo do usuario_atual: referência mutável entre threads.
+    Roda em paralelo — é a ÚNICA thread que lê do socket.
+
+    Classifica cada mensagem recebida:
+    - 'server-push'  → imprime na tela (broadcast, privado, notificação)
+    - qualquer outra → é uma resposta RPC; coloca na fila do stub
+                       para a thread principal consumir via _call()
+
+    Dessa forma nunca há duas threads competindo pelo mesmo readline(),
+    eliminando o race condition que causava o freeze no /lista.
     """
     while rodando[0]:
         try:
-            raw = socket_file.readline()
+            raw = stub.socket_file.readline()
 
             if not raw:
                 # servidor fechou a conexão
@@ -26,10 +31,13 @@ def thread_recebimento(socket_file, rodando):
 
             msg = decode(raw)
 
-            # mensagens do servidor são "server-push" — não são respostas a requests
             if msg.get("request_id") == "server-push":
+                # notificação do servidor — imprime direto
                 print(f"\n{msg['payload']['msg']}")
                 print(">> ", end="", flush=True)  # reimprime o prompt
+            else:
+                # resposta a um request RPC — roteia para a thread principal
+                stub._response_queue.put(msg)
 
         except Exception:
             if rodando[0]:
@@ -71,17 +79,20 @@ def main():
         print(f"[Erro] Não foi possível conectar: {e}")
         return
 
-    # ─── faz login antes de qualquer coisa ───────────────────────────────────
-    usuario = fazer_login(stub)
-
-    # ─── sobe a thread de recebimento ─────────────────────────────────────────
+    # ─── sobe a thread de recebimento ANTES do login ──────────────────────────
+    # A thread precisa estar rodando antes de qualquer _call(), pois é ela
+    # que lê o socket e coloca as respostas na fila. Sem ela, _call() trava
+    # em queue.get() indefinidamente, mesmo no login.
     rodando = [True]
     t = threading.Thread(
         target=thread_recebimento,
-        args=(stub.socket_file, rodando),
+        args=(stub, rodando),
         daemon=True
     )
     t.start()
+
+    # ─── faz login ────────────────────────────────────────────────────────────
+    usuario = fazer_login(stub)
 
     mostrar_ajuda()
 

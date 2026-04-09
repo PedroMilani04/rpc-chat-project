@@ -4,6 +4,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 import socket
+import queue
 from shared.protocol import (
     make_request, make_ack, encode, decode,
     Operations, Mode
@@ -14,6 +15,9 @@ class ChatStub:
         self.host = host
         self.port = port
         self.socket_file = None  # começa sem conexão
+        # fila usada para roteamento: a thread de recebimento coloca aqui
+        # as respostas RPC; a thread principal consome daqui
+        self._response_queue = queue.SimpleQueue()
 
     # ─── Conexão ──────────────────────────────────────────────────────────────
     def conectar(self):
@@ -54,11 +58,11 @@ class ChatStub:
         )
 
     def listar_usuarios(self):
-        """RRA — exemplo de confirmação de recebimento."""
+        """RR — retorna a lista de usuários online."""
         return self._call(
             operation_id=Operations.LIST_USERS,
             payload={},
-            mode=Mode.RRA
+            mode=Mode.RR
         )
 
     def logout(self):
@@ -89,9 +93,10 @@ class ChatStub:
         if mode == Mode.R:
             return None
 
-        # ─── modos RR e RRA: espera resposta ─────────────────────────────────
-        raw = self.socket_file.readline()
-        res = decode(raw)
+        # ─── modos RR e RRA: espera resposta via fila ─────────────────────────
+        # A thread de recebimento é a ÚNICA que lê o socket;
+        # ela coloca as respostas aqui e a thread principal consome.
+        res = self._response_queue.get()
 
         # ─── modo RRA: manda confirmação de recebimento ───────────────────────
         if mode == Mode.RRA:
